@@ -1,0 +1,10 @@
+version: 0.2
+phases:
+  build:
+    commands:
+      - 'echo "${CODEBUILD_RESOLVED_SOURCE_VERSION}" > SOURCE_VERSION'
+artifacts:
+  files:
+    - '**/*'
+#  discard-paths: yes
+  name: ${EnvType}-${Project}

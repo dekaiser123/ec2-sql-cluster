@@ -1,0 +1,13 @@
+---
+- name: Cluster and SQL Server (AG) Configuration
+  #serial: 1
+  hosts: SQL_SVRNODE
+  gather_facts: no
+  any_errors_fatal: True
+  roles:
+     - common
+     - role: cluster_wfc
+       when:
+        - (cluWitness | lower ) != "standalone"
+        - (HOST_COUNT | int) > 1
+     - sql_ag

@@ -1,0 +1,31 @@
+version: 0.2
+env:    
+    git-credential-helper: yes #otherwise can't download eh modules
+phases:
+  install:
+    commands:
+      - "cd /usr/local/bin"
+      - "wget https://releases.hashicorp.com/terraform/1.2.1/terraform_1.2.1_linux_amd64.zip"
+      - unzip -o terraform_1.2.1_linux_amd64.zip
+  pre_build:
+    commands:
+      - terraform --version
+  build:
+    commands:
+      - TF_IN_AUTOMATION=TRUE
+      - cd "${CODEBUILD_SRC_DIR}/terraform"
+      - terraform init -no-color -backend-config="./envs/${EnvType}/terraform_state.tfvars"
+      - |
+        if expr "${DestroyTF}" : 'true' >/dev/null; then
+          terraform plan -destroy -compact-warnings -input=false -no-color -var-file="./envs/${EnvType}/terraform.tfvars" -out="/tmp/${Project}_${EnvType}_${PipelineFor}_plan.txt"
+        else
+          terraform plan -compact-warnings -input=false -no-color -var-file="./envs/${EnvType}/terraform.tfvars" -out="/tmp/${Project}_${EnvType}_${PipelineFor}_plan.txt"
+        fi
+  post_build:
+    commands:
+      - echo terraform plan completed on `date`
+artifacts:
+  files:
+      - "/tmp/${Project}_${EnvType}_${PipelineFor}_plan.txt"
+  discard-paths: yes
+  name: TerraformPlan

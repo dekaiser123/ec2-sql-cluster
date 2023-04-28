@@ -1,0 +1,48 @@
+---
+- name: check powershell script InitializeStorageVol.ps1 exist
+  win_stat:
+    path: C:\SQL\ansible\common\InitializeStorageVol.ps1
+  register: InitializeStorageVolExist
+
+- name: Get disk facts
+  community.windows.win_disk_facts:
+    filter:
+      - physical_disk #needs to filter otherwise storagepool disks causes exception on null argument
+
+- debug:
+    #var: disk_facts #comment out var or msg can't have both
+    msg: '{{ disk.partition_style }} with index {{ index }}'
+  loop: '{{ ansible_facts.disks }}'
+  loop_control:
+    loop_var: disk
+    index_var: index
+    label: "{{ disk.number }}"
+  when: disk.partition_style == "RAW"
+  register: disk_raw
+
+- debug:
+    msg: "{{ (disk_raw | length + 1) - (disk_raw | json_query('results[*].skipped') | length) }}" #indexs at 0
+
+- name: Set number of elements
+  set_fact:
+    Number_of_elements: "{{ (disk_raw | length + 1) - (disk_raw | json_query('results[*].skipped') | length) }}" #indexs at 0
+
+- name: StorageVol script
+  win_command: powershell.exe -ExecutionPolicy ByPass -File C:\SQL\ansible\common\InitializeStorageVol.ps1
+  when: 
+    - InitializeStorageVolExist.stat.exists
+    - (Number_of_elements | int) > 0
+  become: yes
+  become_user: Administrator
+  # ignore_errors: yes
+  # ignore_unreachable: yes
+  retries: "{{ Number_of_elements | int }}"
+  register: InitializeStorageVol
+
+# - debug:
+#     var: InitializeStorageVol
+
+- name: Reboot a machine after disk mount
+  win_reboot:
+    #pre_reboot_delay: 5
+  when: InitializeStorageVol.changed

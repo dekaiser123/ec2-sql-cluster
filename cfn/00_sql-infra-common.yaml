@@ -1,0 +1,264 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This template creates Infra componets required for terraform and pipeline
+
+## Parameters ##
+Parameters:
+  EnvType:
+    Description: "Environment that these resources are being created for."
+    Type: String
+    AllowedValues:
+      - dev
+      - uat
+      - prod
+      - test
+  Project:
+    Description: Project Application Name for which resources are created.
+    Type: String
+    AllowedPattern: ^[a-z]+(-[a-z]+)*$
+    ConstraintDescription: Malformed input-Parameter ProjectName must only contain lowercase letters and hyphens.
+
+  NotificationEmailAddress:
+    Type: String
+    Description: Email address that will receive notificaions for pipeline approval
+
+  SNSKeyID:
+    Type: String
+    Description: AWS SNS KMS keyID
+
+  AccessLogBucket:
+    Type: String
+    Description: Seperate S3 bucket to dump s3 access logs
+
+## Metadata ##
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "Environment Type"
+        Parameters:
+          - EnvType
+      -
+        Label:
+          default: "Project"
+        Parameters:
+          - Project
+    ParameterLabels:
+      EnvType:
+        default: "Which Environment are these resources being created for?"
+      Project:
+        default: "Specify the Project name"
+## Conditions ##
+Conditions:
+  CreateProdResources: !Equals [ !Ref EnvType, "prod" ]
+## Resources ##
+Resources:
+  ArtifactBucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      BucketName: !Join ["-", [!Ref 'Project',!Ref 'EnvType',sql,artifact,!Ref "AWS::AccountId"]]
+      LoggingConfiguration:
+        DestinationBucketName: !Ref 'AccessLogBucket'
+        LogFilePrefix: !Join [ "/", [!Ref 'Project',ArtifactBucket]]
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [!Ref 'Project',!Ref 'EnvType',sql,artifact,!Ref "AWS::AccountId"]]
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref EnvType
+      LifecycleConfiguration:
+        Rules:
+          - Id: Expire files older than 30 days
+            Status: Enabled
+            ExpirationInDays: 30
+          - Id: Expire non-current versions older than 1 day
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+  ArtifactBucketpolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn: ArtifactBucket
+    Properties:
+      Bucket:
+        Ref: ArtifactBucket
+      PolicyDocument:
+        Statement:
+          - Sid: S3ForceSSL
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Join ["", ['arn:aws:s3:::', Ref: ArtifactBucket]]
+              - !Join ["", ['arn:aws:s3:::', Ref: ArtifactBucket,'/*']]
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+  # TerraformStateBucket:
+  #   Type: 'AWS::S3::Bucket'
+  #   DeletionPolicy: Retain
+  #   Properties:
+  #     BucketName: !Join ["-", [!Ref 'Project',!Ref 'EnvType',sql,tfstate,!Ref "AWS::AccountId"]]
+  #     PublicAccessBlockConfiguration:
+  #       BlockPublicAcls: True
+  #       BlockPublicPolicy: True
+  #       IgnorePublicAcls: True
+  #       RestrictPublicBuckets: True
+  #     BucketEncryption:
+  #       ServerSideEncryptionConfiguration:
+  #         - ServerSideEncryptionByDefault:
+  #             SSEAlgorithm: AES256
+  #     LoggingConfiguration:
+  #       DestinationBucketName: !Ref ArtifactBucket
+  #       LogFilePrefix: !Join [ "/", [!Ref 'Project',TerraformStateBucket]]
+  #     VersioningConfiguration:
+  #       Status: Enabled
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Join ["-", [!Ref 'Project',!Ref 'EnvType',sql,tfstate,!Ref "AWS::AccountId"]]
+  #       - Key: Project
+  #         Value: !Ref Project
+  #     LifecycleConfiguration:
+  #       Rules:
+  #         - Id: Expire files older than 30 days
+  #           Status: Enabled
+  #           ExpirationInDays: 30
+  #         - Id: Expire non-current versions older than 1 day
+  #           Status: Enabled
+  #           ExpiredObjectDeleteMarker: true
+  #           NoncurrentVersionExpiration:
+  #             NoncurrentDays: 1
+  # TerraformStateBucketpolicy:
+  #   Type: AWS::S3::BucketPolicy
+  #   DependsOn: TerraformStateBucket
+  #   Properties:
+  #     Bucket:
+  #       Ref: TerraformStateBucket
+  #     PolicyDocument:
+  #       Statement:
+  #         - Sid: S3ForceSSL
+  #           Effect: Deny
+  #           Principal: "*"
+  #           Action: "s3:*"
+  #           Resource:
+  #            - !Join [ "", [ 'arn:aws:s3:::', Ref: TerraformStateBucket ] ]
+  #            - !Join [ "", [ 'arn:aws:s3:::', Ref: TerraformStateBucket,'/*' ] ]
+  #           Condition:
+  #             Bool:
+  #               aws:SecureTransport: false
+  TerraformStateDynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: "LockID"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "LockID"
+          KeyType: "HASH"
+      TableName: !Join ["-", [!Ref 'Project',!Ref 'EnvType',sql,tfstate]]
+      BillingMode: "PAY_PER_REQUEST"
+      # ProvisionedThroughput:
+      #   ReadCapacityUnits: "2"
+      #   WriteCapacityUnits: "1"
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [!Ref 'Project',!Ref 'EnvType',sql,tfstate]]
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref EnvType
+# Pipeline Approval Notification
+  ApprovalNotificationTopic:
+    Type: "AWS::SNS::Topic"
+    DeletionPolicy: Retain
+    Properties:
+      Subscription:
+        - Endpoint: !Ref NotificationEmailAddress
+          Protocol: email
+      TopicName: !Join ["-", [!Ref 'Project',!Ref 'EnvType',sql,sns]]
+      KmsMasterKeyId: !Ref SNSKeyID
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [!Ref 'Project',!Ref 'EnvType',sql,sns]]
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref EnvType
+  # CloudWatchLogGroup:
+  #   Type: "AWS::Logs::LogGroup"
+  #   DeletionPolicy: Retain
+  #   Properties:
+  #     LogGroupName: !Join ["-", [!Ref 'Project',!Ref 'EnvType',sql]]
+  #     RetentionInDays: '7'
+
+## Outputs ##
+Outputs:
+  # TerraformStateBucketName:
+  #   Description: The terraform state bucket name.
+  #   Value: !Ref 'TerraformStateBucket'
+  #   Export:
+  #     Name: !Sub ${AWS::StackName}-BucketName
+  # TerraformStateBucketARN:
+  #   Description: The terraform state bucket ARN.
+  #   Value: !GetAtt TerraformStateBucket.Arn
+  #   Export:
+  #     Name: !Sub ${AWS::StackName}-BucketARN
+  TerraformStateDynamoDBTableARN:
+    Description: The terraform state DynamoDB ARN.
+    Value: !GetAtt TerraformStateDynamoDBTable.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-DynamoDBTableARN
+  TerraformStateDynamoDBTable:
+    Description: The terraform state DynamoDB table.
+    Value: !Ref 'TerraformStateDynamoDBTable'
+    Export:
+      Name: !Sub ${AWS::StackName}-DynamoDBTable
+  ArtifactBucketARN:
+    Description: The Source Code Artifact bucket ARN
+    Value: !GetAtt ArtifactBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-ArtifactBucketARN
+  ArtifactBucketName:
+    Description: The Source Code Artifact bucket name
+    Value: !Ref 'ArtifactBucket'
+    Export:
+      Name: !Sub ${AWS::StackName}-ArtifactBucketName
+# Pipeline Approval Notification
+  ApprovalNotificationTopicName:
+     Description: Approval notification topic name
+     Value: !GetAtt ApprovalNotificationTopic.TopicName
+     Export:
+      Name: !Sub ${AWS::StackName}-ApprovalNotificationTopicName
+  ApprovalNotificationTopicARN:
+    Description: Approval notification topic ARN
+    Value: !Ref ApprovalNotificationTopic
+    Export:
+      Name: !Sub ${AWS::StackName}-ApprovalNotificationTopicARN
+#Cloudwatch LogGroup
+  # CloudWatchLogGroupName:
+  #   Description: CloudWatch Log Group Name
+  #   Value: !Ref CloudWatchLogGroup
+  #   Export:
+  #     Name: !Sub ${AWS::StackName}-CloudWatchLogGroupName
+  # CloudWatchLogGroupARN:
+  #   Description: CloudWatch LogGroup ARN
+  #   Value: !GetAtt CloudWatchLogGroup.Arn
+  #   Export:
+  #     Name: !Sub ${AWS::StackName}-CloudWatchLogGroupARN

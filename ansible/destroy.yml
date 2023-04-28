@@ -1,0 +1,12 @@
+---
+# Configure SQL Cluster re-build
+- name: SQL Server Configuration
+  hosts: SQL_SVRNODE
+  #serial: 1
+  gather_facts: False
+  tasks:
+    - include_role:
+        name: destroy_ag
+      when:
+        - (cluWitness | lower ) != "standalone"
+        - (HOST_COUNT | int) > 1

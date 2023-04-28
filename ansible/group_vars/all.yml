@@ -1,0 +1,13 @@
+---
+### SECTION A - Vars required for SRV AD domain  ###
+
+ad_srv_user: '{{ ansible_user }}'
+ad_srv_pwd: '{{ ansible_password }}'
+
+### SECTION B - Vars required for others  ###
+
+localAccount: '{{ localAccount }}'
+cluWitness: '{{ cluWitness }}'
+s3Bucket: '{{ s3Bucket }}'
+# proxyPassword: '{{ proxyPassword }}'
+HOST_COUNT: "{{ ansible_play_hosts | length }}"

@@ -1,0 +1,163 @@
+---
+- name: First check for any Sqlserver iso file
+  ansible.windows.win_find:
+    paths: C:\SQL
+    patterns: '*sql*.iso'
+  register: result
+
+- name: Fail play - found multiple sql iso images
+  fail:
+    msg: "{{ inventory_hostname }} has {{ result.matched }} iso images - rdp to host and delete rogue iso"
+  when: result.matched > 1
+
+- name: Copy SqlServer iso
+  win_command: aws s3 cp "{{ s3Bucket }}/SQL/" "C:\SQL" --recursive --no-progress --exclude "*" --include "*sql*.iso"
+  register: s3_sqlserveriso
+  when: result.matched == 0
+
+- name: Final check to get path of Sqlserver iso file
+  ansible.windows.win_find:
+    paths: C:\SQL
+    patterns: '*sql*.iso'
+  register: sqlserveriso
+
+- name: Get info for MSSQL service
+  ansible.windows.win_service_info:
+    name: MSSQLSERVER
+  register: sql_service
+
+- name: Get SQL version
+  set_fact:
+    sqlversion: "{{ sqlserveriso.files[0].filename.split('_')[3] }}"
+
+- name: Mount sql install iso image
+  community.windows.win_disk_image:
+    image_path: "{{ sqlserveriso.files[0].path }}"
+    state: present
+  register: sql_disk_mounted
+  when:
+    - sqlserveriso.matched == 1
+    - not sql_service.exists
+
+- name: Get AD group for SQLadmins
+  ansible.windows.win_command: powershell.exe -
+  args:
+    #stdin: (Get-LocalGroupMember -Group "Administrators" | Where {$_.Name -like "*SQL*" -and $_.ObjectClass -eq "Group"}).Name
+    stdin: (Get-ItemProperty "HKLM:\SYSTEM\SQL" -ErrorAction SilentlyContinue).sqladmins
+  register: sqladmins
+  when: not sql_service.exists
+
+- name: check SQL config file exists
+  win_stat:
+    path: C:\SQL\ansible\sql_ag\{{ sqlversion }}ConfigurationFile.ini
+  register: sqlconfig
+
+- name: Run setup from mounted iso
+  win_package:
+    path: '{{ sql_disk_mounted.mount_paths[0] }}\setup.exe'
+    arguments:
+      - '/AGTSVCACCOUNT={{ ad_srv_user }}'
+      - '/SQLSVCACCOUNT={{ ad_srv_user }}'
+      - '/SQLSYSADMINACCOUNTS={{ sysadmin }}'
+      - '{{ ad_srv_user }}' #need a new argument to add 2nd sysadmin account for some reason and is required for the Hadr_endpoint
+      - '/AGTSVCPASSWORD={{ ad_srv_pwd }}'
+      - '/SQLSVCPASSWORD={{ ad_srv_pwd }}'
+      - '/SAPWD={{ ad_srv_pwd }}'
+      - '/ConfigurationFile=C:\SQL\ansible\sql_ag\{{ sqlversion }}ConfigurationFile.ini'
+  vars:
+    ansible_become: yes
+    ansible_become_method: runas
+    ansible_become_user: "{{ ad_srv_user }}"
+    ansible_become_pass: "{{ ad_srv_pwd }}"
+    ansible_become_flags: logon_type=batch
+    sysadmin: "{{ sqladmins.stdout | trim }}"
+  register: sqlinstall
+  when:
+    - sqlconfig.stat.exists
+    - not sql_service.exists
+    - (sql_disk_mounted.mount_paths[0] | default('', true) | trim) != ''
+
+- name: Unmount sql install iso image
+  community.windows.win_disk_image:
+    image_path: "{{ sqlserveriso.files[0].path }}"
+    state: absent
+
+- name: check Sql server install register
+  set_fact:
+    RebootRequired: "{{ sqlinstall.changed | ternary (sqlinstall.reboot_required, False ) }}"
+
+- name: Reboot if Sql server required
+  win_reboot:
+  when: 
+    - RebootRequired
+
+- name: Set SQL Directories
+  set_fact:
+    sqldirlist: []
+
+- name: SQL Config File on Ansible host
+  set_fact:
+    configfile: "{{ '../files/sql_ag/' + sqlversion + 'ConfigurationFile.ini' }}"
+
+- name: Get SQL Directories
+  set_fact:
+    sqldirlist: "{{ sqldirlist + [ lookup('ini', '{{ item }} encoding=utf-16 section=OPTIONS file={{ configfile }}') | regex_replace('\"', '') ] }}"
+  loop: "{{ sqldir }}"
+
+- name: Add TempDB SQL Directory
+  set_fact:
+    sqldirlist: "{{ sqldirlist + [ (tempdb + instancename) ] }}"
+  vars:
+    instancename: "{{ lookup('ini', 'INSTANCENAME encoding=utf-16 section=OPTIONS file={{ configfile }}') | regex_replace('\"', '') }}"
+
+- name: check the directory if already exist
+  win_stat:
+    path: "{{ item }}"
+  loop: "{{ sqldirlist }}"
+  register: folderPresent
+
+- name: Create the directory
+  win_file:
+    path: "{{ item.item }}"
+    state: directory
+  loop: "{{ folderPresent.results }}"
+  when: not item.stat.exists
+  register: folderCreated
+  become: yes
+  become_user: Administrator
+  # ignore_errors: yes
+
+- name: Add write right for authenticated users
+  win_acl:
+    path: "{{ item.item }}" #inconsistent behaviour, value here cannot be encapsulated with double quotes
+    user: "{{ ad_srv_user }}"
+    rights: Read,Write,Modify,FullControl,Delete
+    type: allow
+    state: present
+    inherit: ContainerInherit, ObjectInherit
+    propagation: 'None'
+  loop: "{{ folderPresent.results }}"
+  when: folderCreated.changed
+  become: yes
+  become_user: Administrator
+  # ignore_errors: yes
+
+- name: Move tempDB files and restart MSSQLServer
+  win_command: powershell.exe -ExecutionPolicy ByPass -File C:\SQL\ansible\sql_ag\sql_maint_scripts\MoveTempDB.ps1 -driveletter "{{ tempdb[0] }}" -filecount "{{ filecount }}"
+  when: checkfldr.stat.exists or createfldr.changed
+  vars:
+    checkfldr: "{{ folderPresent.results | last }}"
+    createfldr: "{{ folderCreated.results | last }}"
+    filecount: "{{ lookup('ini', 'SQLTEMPDBFILECOUNT encoding=utf-16 section=OPTIONS file={{ configfile }}') | regex_replace('\"', '') }}"
+    ansible_become: yes
+    ansible_become_method: runas
+    ansible_become_user: "{{ ad_srv_user }}"
+    ansible_become_pass: "{{ ad_srv_pwd }}"
+    ansible_become_flags: logon_type=batch
+  register: movetempdb
+
+- debug: 
+    var: movetempdb.stdout_lines
+
+- debug: 
+    var: movetempdb.stderr_lines

@@ -1,0 +1,4 @@
+---
+- include_tasks: 00-CreateDirectory.yaml
+- include_tasks: 10-CopyScripts.yaml
+- include_tasks: 20-DiskMount.yaml

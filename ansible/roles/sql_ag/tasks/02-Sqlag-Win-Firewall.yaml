@@ -1,0 +1,27 @@
+- name: Firewall rule to allow inbound TCP port 1433 - SQL AG
+  community.windows.win_firewall_rule:
+    name: Allow inbound TCP Port 1433 - SQL AG
+    localport: 1433
+    action: allow
+    direction: in
+    protocol: tcp
+    state: present
+    enabled: yes
+  register: result
+  retries: 3
+  delay: 15
+  until: result is not failed
+
+- name: Firewall rule to allow inbound TCP port 5022-5023 SQL AG
+  community.windows.win_firewall_rule:
+    name: Allow inbound TCP Port SQL Listeners 5022-5023 - SQL AG
+    localport: 5022-5023
+    action: allow
+    direction: in
+    protocol: tcp
+    state: present
+    enabled: yes
+  register: result
+  retries: 3
+  delay: 15
+  until: result is not failed

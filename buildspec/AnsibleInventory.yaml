@@ -1,0 +1,41 @@
+version: 0.2
+env:
+  shell: bash
+  variables:
+     TZ: "Australia/Sydney"
+     LANG: "C.UTF-8"
+     LC_ALL: "C.UTF-8"
+phases:
+  install:
+    commands:
+      - "cd /usr/local/bin"
+      - aws s3 cp "s3://${S3AppBucket}/SQL/packages/${CODEBUILD_BUILD_IMAGE}" . --region ap-southeast-2 --no-progress --recursive
+      - aws s3 cp "s3://${S3AppBucket}/SQL/packages/AWS.Tools.4.1.104.zip" . --region ap-southeast-2 --no-progress
+      - cd ansible && dpkg -i *.deb && cd ..
+      - virtualenv "${CODEBUILD_SRC_DIR}/ansible" && source "${CODEBUILD_SRC_DIR}/ansible/bin/activate"
+      - pip install --no-index --find-links=/usr/local/bin/pywinrm pywinrm
+      - PSModPaths=$(pwsh -Command "(Get-ChildItem env:PSModulePath).Value") && LastPath=${PSModPaths##*:}
+      - echo $LastPath
+      - unzip -o -q AWS.Tools.4.1.104.zip -d $LastPath;
+  pre_build:
+    commands:
+      - ansible --version
+      - pip show pywinrm
+      - pwsh -Command "Get-CPPipelineList"
+  build:
+    commands:
+      - export TERRAFORM_OUTPUT_FILE="${CODEBUILD_SRC_DIR_TerraformOutput}/${Project}_${EnvType}_${PipelineFor}_tfout.json"
+      - cd "${CODEBUILD_SRC_DIR}/ansible"
+      - chmod 777 -R "${CODEBUILD_SRC_DIR}/ansible/files"
+      - chmod 777 "${CODEBUILD_SRC_DIR}/ansible/sql_host.ps1"
+      - pwsh ./sql_host.ps1 -S3AppBucket "s3://${S3AppBucket}" -AnsiblePlaybook "${AnsiblePlaybook}"
+  post_build:
+    commands:
+      - echo ansible apply completed on `date`
+    finally:
+      - exit 1 #to force error so pipeline can just be retried
+artifacts:
+  files:
+    - "${CODEBUILD_SRC_DIR}/ansible/sql_host.ps1"
+  discard-paths: yes
+  name: Ansible_Sql_Host

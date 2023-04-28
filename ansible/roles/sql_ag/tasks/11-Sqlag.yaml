@@ -1,0 +1,102 @@
+---
+- name: check EnableAlwaysOnAG.ps1 exist
+  win_stat:
+    path: C:\SQL\ansible\sql_ag\EnableAlwaysOnAG.ps1
+  register: result
+
+- name: Run EnableAlwaysOnAG.ps1
+  win_command: powershell.exe -ExecutionPolicy ByPass -File C:\SQL\ansible\sql_ag\EnableAlwaysOnAG.ps1
+  vars:
+    ansible_become: yes
+    ansible_become_method: runas
+    ansible_become_user: "{{ ad_srv_user }}"
+    ansible_become_pass: "{{ ad_srv_pwd }}"
+    ansible_become_flags: logon_type=batch
+  register: EnableAlwaysOnAG
+  when: result.stat.exists
+
+- debug: 
+    var: EnableAlwaysOnAG.stdout_lines
+
+- debug: 
+    var: EnableAlwaysOnAG.stderr_lines
+
+- name: Ensure SQL services are started and running
+  ansible.windows.win_service:
+    name: "{{ item }}"
+    state: started
+  loop:
+    - 'MSSQLSERVER'
+    - 'SQLSERVERAgent'
+
+- name: check CreateAlwaysOnAGwListener.ps1 exist
+  win_stat:
+    path: C:\SQL\ansible\sql_ag\CreateAlwaysOnAGwListener.ps1
+  register: result
+
+- name: Run CreateAlwaysOnAGwListener.ps1
+  win_command: powershell.exe -ExecutionPolicy ByPass -File C:\SQL\ansible\sql_ag\CreateAlwaysOnAGwListener.ps1 -AdUsername "{{ ad_srv_user }}"
+  # ignore_errors: yes
+  # ignore_unreachable: yes
+  vars:
+    ansible_become: yes
+    ansible_become_method: runas
+    ansible_become_user: "{{ ad_srv_user }}"
+    ansible_become_pass: "{{ ad_srv_pwd }}"
+    ansible_become_flags: logon_type=batch
+  register: CreateAlwaysOnAGwListener
+  when: result.stat.exists
+  run_once: true
+  delegate_to: "{{ play_hosts[0] }}"
+
+- debug: 
+    var: CreateAlwaysOnAGwListener.stdout_lines
+  run_once: true
+
+- debug: 
+    var: CreateAlwaysOnAGwListener.stderr_lines
+  run_once: true
+
+- name: Test Failover to Secondary
+  win_command: powershell.exe -ExecutionPolicy ByPass -File C:\SQL\ansible\sql_ag\sql_maint_scripts\TestAlwaysonAG.ps1 -SecondaryServer "{{ play_hosts[1] }}"
+  vars:
+    ansible_become: yes
+    ansible_become_method: runas
+    ansible_become_user: "{{ ad_srv_user }}"
+    ansible_become_pass: "{{ ad_srv_pwd }}"
+    ansible_become_flags: logon_type=batch
+  register: FailovertoSecondary
+  when: (CreateAlwaysOnAGwListener.stderr_lines | default('', true) | trim) == ''
+  run_once: true
+  delegate_to: "{{ play_hosts[0] }}"
+
+- debug: 
+    var: FailovertoSecondary.stdout_lines
+  run_once: true
+
+- debug: 
+    var: FailovertoSecondary.stderr_lines
+  run_once: true
+
+- name: Test Failover back to Primary
+  win_command: powershell.exe -ExecutionPolicy ByPass -File C:\SQL\ansible\sql_ag\sql_maint_scripts\TestAlwaysonAG.ps1 -SecondaryServer "{{ play_hosts[0] }}"
+  vars:
+    ansible_become: yes
+    ansible_become_method: runas
+    ansible_become_user: "{{ ad_srv_user }}"
+    ansible_become_pass: "{{ ad_srv_pwd }}"
+    ansible_become_flags: logon_type=batch
+  register: FailoverbacktoPrimary
+  when:
+    - (CreateAlwaysOnAGwListener.stderr_lines | default('', true) | trim) == ''
+    - (FailovertoSecondary.stderr_lines | default('', true) | trim) == ''
+  run_once: true
+  delegate_to: "{{ play_hosts[1] }}"
+
+- debug: 
+    var: FailoverbacktoPrimary.stdout_lines
+  run_once: true
+
+- debug: 
+    var: FailoverbacktoPrimary.stderr_lines
+  run_once: true

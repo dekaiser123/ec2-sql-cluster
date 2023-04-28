@@ -1,0 +1,40 @@
+---
+- name: check the directory if already exist
+  win_stat:
+    path: C:\SQL\{{ item }}
+  register: folderPresent
+  loop:
+    - ansible
+
+- name: Create the directory
+  win_file:
+    path: C:\SQL\{{ item.item }}
+    state: directory
+  loop: "{{ folderPresent.results }}"
+  when: not item.stat.exists
+  register: folderCreated
+  become: yes
+  become_user: Administrator
+  # ignore_errors: yes
+
+# - debug:
+#     var: folderCreated
+
+- name: Add write right for authenticated users
+  win_acl:
+    path: C:\SQL\{{ item.item }}
+    user: BUILTIN\Users
+    rights: Read,Write,Modify,FullControl,Delete
+    type: allow
+    state: present
+    inherit: ContainerInherit, ObjectInherit
+    propagation: 'None'
+  loop: "{{ folderPresent.results }}"
+  when: folderCreated.changed
+  register: addRights
+  become: yes
+  become_user: Administrator
+  # ignore_errors: yes
+
+# - debug:
+#     var: addRights

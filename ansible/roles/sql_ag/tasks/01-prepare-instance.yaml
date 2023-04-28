@@ -1,0 +1,76 @@
+---
+- name: Install Windows Feature - RSAT-AD-PowerShell, .NET45
+  ansible.windows.win_feature:
+    name:
+    - RSAT-AD-PowerShell
+    - RSAT-ADLDS
+    - NET-Framework-45-Features
+    state: present
+  register: win_feature
+  retries: 3
+  delay: 15
+  until: win_feature is not failed
+
+- name: Reboot if installing feature requires it
+  win_reboot:
+  when: win_feature.reboot_required
+
+- name: check SqlServer.zip PSmodule exist
+  win_stat:
+    path: C:\SQL\SqlServer.zip
+  register: sqlserver
+
+- name: Copy PSmodules from s3
+  win_command: aws s3 cp "{{ s3Bucket }}/SQL/SqlServer.zip" "C:\SQL" --no-progress
+  register: s3_sqlserver
+  when: not sqlserver.stat.exists
+
+- name: check SqlServer PSmodule is unzipped exist
+  win_stat:
+    path: C:\Program Files\WindowsPowerShell\Modules\SqlServer
+  register: unzip_sqlserver
+
+- name: Unzip PSmodule into PS Modules directory
+  win_unzip:
+    src: 'C:\SQL\SqlServer.zip'
+    dest: 'C:\Program Files\WindowsPowerShell\Modules\'
+  register: result
+  retries: 3
+  delay: 15
+  until: result is not failed
+  when:
+    - not unzip_sqlserver.stat.exists
+    - s3_sqlserver.changed
+
+- name: check SSMS-Setup-ENU.exe exist
+  win_stat:
+    path: C:\SQL\SSMS-Setup-ENU.exe
+  register: ssms
+
+- name: Copy SSMS install
+  win_command: aws s3 cp "{{ s3Bucket }}/common/SSMS-Setup-ENU.exe" "C:\SQL" --no-progress
+  register: s3_ssms
+  when: not ssms.stat.exists
+
+- name: Install SQL Server Management Studio
+  win_package:
+    path: C:\SQL\SSMS-Setup-ENU.exe
+    arguments: 
+      - /install 
+      - /passive 
+      - /norestart
+  become: yes
+  become_user: Administrator
+  #become_method: runas
+  register: InstallSsms
+  ignore_errors: yes
+  when: s3_ssms.changed
+
+- name: check InstallSsms register
+  set_fact:
+    RebootRequired: "{{ InstallSsms.changed | ternary (InstallSsms.reboot_required, False ) }}"
+
+- name: Reboot if ssms required
+  win_reboot:
+  when: 
+    - RebootRequired

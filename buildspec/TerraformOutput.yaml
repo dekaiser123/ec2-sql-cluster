@@ -1,0 +1,40 @@
+version: 0.2
+env:    
+    git-credential-helper: yes #otherwise can't download eh modules
+phases:
+  install:
+    commands:
+      - "cd /usr/local/bin"
+      - "wget https://releases.hashicorp.com/terraform/1.2.1/terraform_1.2.1_linux_amd64.zip"
+      - unzip -o terraform_1.2.1_linux_amd64.zip
+  pre_build:
+    commands:
+      - terraform --version
+  build:
+    commands:
+      - TF_IN_AUTOMATION=TRUE
+      - cd "${CODEBUILD_SRC_DIR}/terraform"
+      - terraform init -no-color -backend-config="./envs/${EnvType}/terraform_state.tfvars"
+      - terraform output -json > "/tmp/${Project}_${EnvType}_${PipelineFor}_tfout.json"
+  post_build:
+    commands:
+      - echo terraform output extracted on `date`
+    finally:
+      - "cd /usr/local/bin"
+      - |
+        if expr "${S3AppBucketSync}" : 'true' >/dev/null; then
+          mkdir pywinrm && cd pywinrm
+          pip download pywinrm
+          aws s3 sync . "s3://${S3AppBucket}/SQL/packages/${CODEBUILD_BUILD_IMAGE}/pywinrm" --region ap-southeast-2 --no-progress --size-only
+          apt-get update
+          apt-get install -y --download-only software-properties-common
+          add-apt-repository --yes --update ppa:ansible/ansible
+          apt-get install -y --download-only ansible
+          cd /var/cache/apt/archives
+          aws s3 sync . "s3://${S3AppBucket}/SQL/packages/${CODEBUILD_BUILD_IMAGE}/ansible" --region ap-southeast-2 --no-progress --size-only --exclude "*" --include "*.deb"
+        fi
+artifacts:
+  files:
+    - "/tmp/${Project}_${EnvType}_${PipelineFor}_tfout.json"
+  discard-paths: yes
+  name: TerraformOutput

@@ -1,0 +1,3 @@
+---
+- include_tasks: 00-CopyScripts.yml
+- include_tasks: 01-remove-ag-cluster.yml

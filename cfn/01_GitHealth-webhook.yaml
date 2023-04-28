@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This template creates webhook for Githealth -- requires additional manual config
+## Mappings ##
+Mappings:
+  GitHub:
+    details:
+      Repo: ec2-sql-cluster
+      Org: dekaiser123
+      Url: 'https://github.com/dekaiser123/ec2-sql-cluster.git'
+    main:
+      Branch: main
+    uat:
+      Branch: uat
+    prod:
+      Branch: prod
+    test:
+      Branch: test
+## Parameters ##
+Parameters:
+  EnvType:
+    Description: "Environment that these resources are being created for."
+    Type: String
+    AllowedValues:
+      - dev
+      - uat
+      - prod
+      - test
+  
+  Project:
+    Description: Project Application Name for which resources are created.
+    Type: String
+    AllowedPattern: ^[a-z]+(-[a-z]+)*$
+    ConstraintDescription: Malformed input-Parameter ProjectName must only contain lowercase letters and hyphens.
+
+  GitTokenSecret:
+    Type: String
+    Description: PAT stored in AWS SSM
+    NoEcho: true
+
+  GitRepository:
+    Type: String
+    Description: Git repo and branch details
+    Default: GitHub
+
+  CodebuildFor:
+    Description: Resource that will be created by the Codebuild
+    Type: String
+    Default: webhook
+
+  ArtifactBucket:
+    Type: String
+    Description: Aritfact bucket name for webhook/codebuild
+  
+  CodeBuildGitCredentialARN:
+    Description: Existing Codebuild Git Source Credential ARN
+    Type: String
+    Default: ""
+## Metadata ##
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "Environment Type"
+        Parameters:
+          - EnvType
+      -
+        Label:
+          default: "Project"
+        Parameters:
+          - Project
+          - CodebuildFor
+      - Label:
+          default: "Input variable values from another cfn stack/bootstrap"
+        Parameters:
+          - ArtifactBucket
+          - CodeBuildGitCredentialARN
+      -
+        Label:
+          default: "Git Repo Details"
+        Parameters:
+          - GitRepository
+          - GitTokenSecret
+    ParameterLabels:
+      EnvType:
+        default: "Which Environment are these resources being created for?"
+      Project:
+        default: "Specify the Project name"
+      GitTokenSecret:
+        default: "Specify the PAT token"
+#############
+# Conditions #
+#############
+Conditions:
+  CreateProdResources: !Equals [ !Ref EnvType, "prod" ]
+  EmptyCodeBuildGitCredentialARN: !Equals [!Ref CodeBuildGitCredentialARN, ""]
+## Resources ##
+Resources:
+  CodeBuildGitCredential:
+    Condition: EmptyCodeBuildGitCredentialARN
+    Type: 'AWS::CodeBuild::SourceCredential'
+    Properties:
+      Token: !Ref GitTokenSecret #!Join ['', ['{{resolve:secretsmanager:', !Ref GitTokenSecret, ':SecretString:PAT}}' ]]
+      ServerType: GITHUB_ENTERPRISE
+      AuthType: PERSONAL_ACCESS_TOKEN
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: '/'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+      RoleName: !Join ["-", [!Ref CodebuildFor,sql,!Ref 'Project',!Ref 'EnvType',codebuild,role]]
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [!Ref CodebuildFor,sql,!Ref 'Project',!Ref 'EnvType',codebuild,role]]
+        - Key: Project
+          Value: !Ref Project
+  CodeBuildPolicy:
+    Type: "AWS::IAM::Policy"
+    DependsOn: CodeBuildServiceRole
+    Properties:
+      PolicyName: !Join ["-", [!Ref CodebuildFor,sql,!Ref 'Project',!Ref 'EnvType',codebuild,policy]]
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: IamAccess
+            Effect: Allow
+            Action:
+              - iam:ListPolicies                                          # to validate sam template
+            Resource: "*"
+          - Sid: S3Access
+            Effect: Allow
+            Action:
+              - s3:List*
+              - s3:GetBucketVersioning                                    # access to S3 artifact bucket
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+            Resource:
+              - !Sub
+                    - 'arn:aws:s3:::${ArtifactBucket}'
+                    - ArtifactBucket: !Ref ArtifactBucket
+              - !Sub
+                    - 'arn:aws:s3:::${ArtifactBucket}/*'
+                    - ArtifactBucket: !Ref ArtifactBucket
+          - Sid: LogEvent
+            Effect: Allow
+            Action:
+              - logs:PutLogEvents                                         # to create cloudwatch log
+              - logs:CreateLogStream
+            Resource:
+              - !Sub
+                    - 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroupName}:*'
+                    - LogGroupName: !Join ["/", ['/aws', codebuild, !Join [ "-", [ !Ref 'EnvType', !FindInMap [ !Ref GitRepository,details,Repo ]]]]]
+              - !Sub
+                    - 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroupName}:*/*'
+                    - LogGroupName: !Join ["/", ['/aws', codebuild, !Join [ "-", [ !Ref 'EnvType', !FindInMap [ !Ref GitRepository,details,Repo ]]]]]
+          - Sid: SsmParameterAccess
+            Effect: Allow
+            Action:
+              - ssm:*                                          # to get ssm parameter
+            Resource:
+              - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*
+      Roles:
+        - !Ref CodeBuildServiceRole
+# https://docs.aws.amazon.com/codebuild/latest/userguide/github-webhook.html
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CodeBuildPolicy #need to ensure policy is created and attached to iam before codebuild
+    #DeletionPolicy: Retain
+    Properties:
+      Artifacts:
+        Type: S3
+        Location: !Ref ArtifactBucket
+        #Path: !Ref CodebuildFor
+        Name: 
+          !Join
+            - "-" 
+            - - !Ref 'EnvType'
+              - !Join [ "", [!FindInMap [ !Ref GitRepository,details,Repo ],'.zip'] ]
+        Packaging: ZIP
+      BadgeEnabled: True
+      Source:
+        Type: GITHUB_ENTERPRISE
+        Location: !FindInMap [ !Ref GitRepository,details,Url ]
+        GitCloneDepth: 1
+        GitSubmodulesConfig:
+          FetchSubmodules: True
+        Auth: #May need to comment out this section when PAT already in use
+          Resource: !If [EmptyCodeBuildGitCredentialARN, !Ref CodeBuildGitCredential, !Ref CodeBuildGitCredentialARN]
+          Type: OAUTH
+        BuildSpec: buildspec/GitHealthSource.yaml
+      Environment:
+        ComputeType: 'BUILD_GENERAL1_SMALL'
+        Image: 'aws/codebuild/standard:5.0'
+        Type: 'LINUX_CONTAINER'
+        EnvironmentVariables:
+          - Name: Project
+            Value: !Ref 'Project'
+          - Name: EnvType
+            Value: !Ref EnvType
+      Name: !Join ["-", [!Ref EnvType,!FindInMap [ !Ref GitRepository,details,Repo ]]]
+      Description: Webhook for GitHealth
+      ServiceRole: !Ref CodeBuildServiceRole
+      TimeoutInMinutes: 15
+      Cache:
+        Modes:
+          - LOCAL_SOURCE_CACHE
+        Type: LOCAL
+## cfn doesn't support webhook trigger manually need to setup in console /* https://github.com/aws-cloudformation/cloudformation-coverage-roadmap/issues/185 */
+#      Triggers:
+#        Webhook: true
+#        FilterGroups:
+#          - - Type: EVENT
+#              Pattern: PUSH,PULL_REQUEST_MERGED
+#            - Type: HEAD_REF
+#              Pattern: !FindInMap [ !Ref GitRepository,details,Branch ]
+      LogsConfig:
+        CloudWatchLogs:
+          Status: 'ENABLED'
+          GroupName: !Join ["/", ['/aws', codebuild, !Join [ "-", [ !Ref 'EnvType', !FindInMap [ !Ref GitRepository,details,Repo ]]]]]
+          #StreamName: !Join ["-", [!Ref CodebuildFor,codebuild]]
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [!Ref Project,!Ref EnvType,!Ref CodebuildFor,codebuild]]
+        - Key: Project
+          Value: !Ref Project
+
+  CloudWatchLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    DependsOn: CodeBuildProject
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Join ["/", ['/aws', codebuild, !Join [ "-", [ !Ref 'EnvType', !FindInMap [ !Ref GitRepository,details,Repo ]]]]]
+      RetentionInDays: '365'
+
+## Outputs ##
+Outputs:
+  CodeBuildGitCredentialARN:
+    Description: The Codebuild Git Source Credentials ARN
+    Value: !If [EmptyCodeBuildGitCredentialARN, !Ref CodeBuildGitCredential, !Ref CodeBuildGitCredentialARN]
+    # Export:
+    #   Name: !Sub ${AWS::StackName}-CodeBuildGitCredentialARN

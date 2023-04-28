@@ -1,0 +1,6 @@
+---
+sqldir:
+  - SQLBACKUPDIR
+  - SQLUSERDBDIR
+  - SQLUSERDBLOGDIR
+tempdb: 'T:\'

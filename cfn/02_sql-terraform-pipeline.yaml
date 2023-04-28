@@ -1,0 +1,455 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This template creates pipeline to execute  terraform module for SQL.
+
+############
+# Mappings #
+############
+
+
+##############
+# Parameters #
+##############
+
+Parameters:
+  EnvType:
+    Description: "Platform that these resources are being created for."
+    Type: String
+    AllowedValues:
+      - dev
+      - uat
+      - prod
+      - test
+  Project:
+    Description: Project Application Name for which resources are created.
+    Type: String
+    AllowedPattern: ^[a-z]+(-[a-z]+)*$
+    ConstraintDescription: Malformed input-Parameter ProjectName must only contain lowercase letters and hyphens.
+
+  PipelineFor:
+    Description: Resource that will be created by the Pipeline
+    Type: String
+    Default: terraform
+
+  GitRepo:
+    Description: The repo name without the env prefix
+    Type: String
+    Default: ec2-sql-cluster
+
+  ApprovalNotificationTopicARN:
+    Type: String
+    Description: SNS topic ARN for pipeline manual approval
+
+  ArtifactBucket:
+    Type: String
+    Description: Aritfact bucket name for webhook/codebuild
+
+  DestroyTF:
+    Description: 1 = true, 0 = false
+    Type: Number
+    MaxValue: 1
+    MinValue: 0
+    Default: 0
+
+#############
+# Metadata #
+#############
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment-Specific Configuration"
+        Parameters:
+          - EnvType
+      - Label:
+          default: "Project Name"
+        Parameters:
+          - Project
+          - PipelineFor
+      - Label:
+          default: "Input variable values from another cfn stack/bootstrap"
+        Parameters:
+          - ApprovalNotificationTopicARN
+          - ArtifactBucket
+          - GitRepo
+      - Label:
+          default: "Terraform Control"
+        Parameters:
+          - DestroyTF
+    ParameterLabels:
+      Account:
+        default: "Which SMC platform this pipeline are created ??"
+#############
+# Conditions #
+#############
+Conditions:
+  CreateProdResources: !Equals [ !Ref EnvType, "prod" ]
+  SetDestroyTF: !Equals [!Ref DestroyTF, 1]
+#############
+# Resources #
+#############
+Resources:
+#CodeBuild IAM Role --full admin access
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: '/'
+      # ManagedPolicyArns:
+      #   - 'arn:aws:iam::aws:policy/AdministratorAccess'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+                - codepipeline.amazonaws.com
+      RoleName: !Join ["-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,role]]
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,role]]
+        - Key: Project
+          Value: !Ref Project
+        - Key: EnvType
+          Value: !Ref EnvType
+        - Key: PipelineFor
+          Value: !Ref PipelineFor
+  CodeBuildPolicy:
+    Type: "AWS::IAM::Policy"
+    DependsOn: CodeBuildServiceRole
+    Properties:
+      PolicyName: !Join ["-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,policy]]
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: IamAccess
+            Effect: Allow
+            Action:
+              - autoscaling:*
+              - backup:*
+              - backup-storage:*
+              - cloudwatch:*
+              - cloudformation:*
+              - codebuild:*
+              - ec2:*
+              - elasticloadbalancing:*
+              - iam:*
+              - logs:*
+              - rds:*
+              - secretsmanager:*
+              - kms:*
+              - sns:*
+              - resource-groups:*
+              - route53:*
+              - s3:*
+              - fsx:*
+              - ds:*
+              - codepipeline:*
+              - codestar-notifications:*
+              - dynamodb:*
+              - events:*
+              - lambda:*
+            Resource: "*"
+          - Sid: S3Access
+            Effect: Allow
+            Action:
+              - s3:*
+            Resource:
+              - !Sub
+                    - 'arn:aws:s3:::${ArtifactBucket}'
+                    - ArtifactBucket: !Ref ArtifactBucket
+              - !Sub
+                    - 'arn:aws:s3:::${ArtifactBucket}/*'
+                    - ArtifactBucket: !Ref ArtifactBucket
+              # - !Sub
+              #       - 'arn:aws:s3:::${ArtifactBucket}'
+              #       - ArtifactBucket: { Fn::ImportValue: !Join [ "-", [ !Ref EnvType, !Ref InfraCommonStack, ArtifactBucketName ] ] }
+              # - !Sub
+              #       - 'arn:aws:s3:::${ArtifactBucket}/*'
+              #       - ArtifactBucket: { Fn::ImportValue: !Join [ "-", [ !Ref EnvType, !Ref InfraCommonStack, ArtifactBucketName ] ] }
+          - Sid: SsmParameterAccess
+            Effect: Allow
+            Action:
+              - ssm:*
+            Resource:
+              - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:*
+      Roles:
+        - !Ref CodeBuildServiceRole
+
+#CodeBuild Project buildspec definition
+  CodeBuildTerraformPlan:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CodeBuildPolicy #need to ensure policy is created and attached to iam before codebuild
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec/TerraformPlan.yaml
+      Environment:
+        ComputeType: 'BUILD_GENERAL1_SMALL'
+        Image: 'aws/codebuild/standard:5.0'
+        Type: 'LINUX_CONTAINER'
+        EnvironmentVariables:
+          - Name: Project
+            Value: !Ref Project
+          - Name: EnvType
+            Value: !Ref EnvType
+          - Name: PipelineFor
+            Value: !Ref PipelineFor
+          - Name: DestroyTF
+            Value: !If [SetDestroyTF, true, false]
+      Name: !Join ["-", [codepipeline, sql, !Ref 'Project',!Ref 'EnvType',codebuild,plan]]
+      LogsConfig:
+        CloudWatchLogs:
+          Status: 'ENABLED'
+          GroupName: !Join ["/", ['/aws', codebuild, !Join [ "-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,plan]]]]
+      Description: Terraform plan
+      ServiceRole: !Ref CodeBuildServiceRole
+      TimeoutInMinutes: 360
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [codepipeline, sql, !Ref 'Project',!Ref 'EnvType',codebuild,plan]]
+        - Key: Project
+          Value: !Ref Project
+        - Key: EnvType
+          Value: !Ref EnvType
+        - Key: PipelineFor
+          Value: !Ref PipelineFor
+  CodeBuildTerraformApply:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CodeBuildPolicy
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec/TerraformApply.yaml
+      Environment:
+        ComputeType: 'BUILD_GENERAL1_SMALL'
+        Image: 'aws/codebuild/standard:5.0'
+        Type: 'LINUX_CONTAINER'
+        EnvironmentVariables:
+          - Name: Project
+            Value: !Ref Project
+          - Name: EnvType
+            Value: !Ref EnvType
+          - Name: PipelineFor
+            Value: !Ref PipelineFor
+          - Name: DestroyTF
+            Value: !If [SetDestroyTF, true, false]
+      Name: !Join ["-", [codepipeline, sql, !Ref 'Project',!Ref 'EnvType',codebuild,apply]]
+      LogsConfig:
+        CloudWatchLogs:
+          Status: 'ENABLED'
+          GroupName: !Join ["/", ['/aws', codebuild, !Join [ "-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,apply]]]]
+      Description: Terraform apply
+      ServiceRole: !Ref CodeBuildServiceRole
+      TimeoutInMinutes: 360
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [codepipeline, sql, !Ref 'Project',!Ref 'EnvType',codebuild,apply]]
+        - Key: Project
+          Value: !Ref Project
+        - Key: EnvType
+          Value: !Ref EnvType
+        - Key: PipelineFor
+          Value: !Ref PipelineFor
+
+#CodePipeline Role and Attach policy --
+  # CodePipelineExecutionRole:
+  #   Type: 'AWS::IAM::Role'
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Version: '2012-10-17'
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal:
+  #             Service:
+  #               - codepipeline.amazonaws.com
+  #           Action:
+  #             - 'sts:AssumeRole'
+  #     Path: /
+  #     Policies:
+  #        -
+  #         PolicyName: PassRoleToCodeBuild-InlinePolicy
+  #         PolicyDocument:
+  #           Version: '2012-10-17'
+  #           Statement:
+  #             - Action: 'iam:PassRole'
+  #               Effect: Allow
+  #               Resource:
+  #                 - !GetAtt CodeBuildServiceRole.Arn
+  #     RoleName: !Join ["-", [!Ref 'Project',!Ref 'EnvType',!Ref 'PipelineFor',codepipeline,role]]
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Join ["-", [!Ref 'Project',!Ref 'EnvType',!Ref 'PipelineFor',codepipeline,role]]
+  #       - Key: Project
+  #         Value: !Ref Project
+  #       - Key: EnvType
+  #         Value: !Ref EnvType
+  #       - Key: PipelineFor
+  #         Value: !Ref PipelineFor
+  # CodePipelineManagedPolicy:
+  #   Type: AWS::IAM::ManagedPolicy
+  #   Properties:
+  #     PolicyDocument:
+  #       Version: '2012-10-17'
+  #       Statement:
+  #         - Sid: CodePipelineSNSAccess
+  #           Effect: Allow
+  #           Action:
+  #             - sns:Publish
+  #           Resource: '*'
+  #         - Sid: CodePipelineCodeBuildAccess
+  #           Effect: Allow
+  #           Action:
+  #             - codebuild:StartBuild
+  #             - codebuild:StopBuild
+  #             - codebuild:BatchGetBuilds
+  #           Resource:
+  #             - !GetAtt CodeBuildTerraformPlan.Arn
+  #             - !GetAtt CodeBuildTerraformApply.Arn
+  #         - Sid: AllowAllUsersToListAccounts
+  #           Effect: Allow
+  #           Action:
+  #             - iam:ListAccountAliases
+  #             - iam:ListUsers
+  #             - iam:GetAccountSummary
+  #           Resource: "*"
+  #         - Sid: CodePipelineCodeCommitAccess
+  #           Effect: Allow
+  #           Action:
+  #             - codecommit:GetBranch
+  #             - codecommit:GetCommit
+  #             - codecommit:UploadArchive
+  #             - codecommit:GetUploadArchiveStatus
+  #             - codecommit:CancelUploadArchive
+  #           Resource: "*"
+  #         - Sid: CodePipelineS3ArtifactAccess
+  #           Effect: Allow
+  #           Action:
+  #             - s3:*
+  #           Resource:
+  #             - !Sub
+  #                   - 'arn:aws:s3:::${TerraformState}/*'
+  #                   - TerraformState: { Fn::ImportValue: !Join [ "-", [ !Ref EnvType, !Ref TFStateStack, BucketName ] ] }
+  #             - !Sub
+  #                   - 'arn:aws:s3:::${TerraformState}'
+  #                   - TerraformState: { Fn::ImportValue: !Join [ "-", [ !Ref EnvType, !Ref TFStateStack, BucketName ] ] }
+  #             - !Sub
+  #                   - 'arn:aws:s3:::${ArtifactBucket}/*'
+  #                   - ArtifactBucket: { Fn::ImportValue: !Join [ "-", [ !Ref EnvType, !Ref TFStateStack, ArtifactBucketName ] ] }
+  #             - !Sub
+  #                   - 'arn:aws:s3:::${ArtifactBucket}'
+  #                   - ArtifactBucket: { Fn::ImportValue: !Join [ "-", [ !Ref EnvType, !Ref TFStateStack, ArtifactBucketName ] ] }
+  #     ManagedPolicyName: !Join ["-", [!Ref 'Project',!Ref 'EnvType',!Ref 'PipelineFor',codepipeline,policy]]
+  #     Description: "CodePipeline Managed Policy"
+  #     Roles:
+  #       - !Ref CodePipelineExecutionRole
+
+#pipeline creation
+  TerraformPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn: CodeBuildPolicy
+    Properties:
+      ArtifactStore:
+        Location: !Ref ArtifactBucket
+          # 'Fn::ImportValue': !Join [ "-", [ !Ref EnvType, !Ref InfraCommonStack, ArtifactBucketName ] ]
+        Type: S3
+        #EncryptionKey: !Ref "AWS::NoValue"
+      Name: !Join ["-", [codepipeline, sql, !Ref 'Project',!Ref 'EnvType']]
+      RoleArn: !GetAtt CodeBuildServiceRole.Arn
+      Stages:
+        - Name: GetSourceCode
+          Actions:
+            - Name: CodeRepoFromGitHealth
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                S3Bucket: !Ref ArtifactBucket
+                S3ObjectKey: !Join [ "", [!Ref 'EnvType','-',!Ref GitRepo,'.zip'] ]
+                PollForSourceChanges: False
+              OutputArtifacts:
+                - Name: !Join [ "", ['src_', !Ref 'PipelineFor'] ]
+              RunOrder: '1'
+        - Name: InfrastructureBuild
+          Actions:
+            - Name: TerraformPlan
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildTerraformPlan
+                PrimarySource: !Join [ "", ['src_', !Ref 'PipelineFor'] ]
+              Namespace: PlanValidation
+              InputArtifacts:
+                - Name: !Join [ "", ['src_', !Ref 'PipelineFor'] ]
+              OutputArtifacts:
+                - Name: TerraformPlan
+              RunOrder: 1
+            - Name: ReviewApproval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: '1'
+                Provider: Manual
+              Configuration:
+                NotificationArn: !Ref ApprovalNotificationTopicARN
+              RunOrder: 2
+            - Name: TerraformApply
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildTerraformApply
+                PrimarySource: !Join [ "", ['src_', !Ref 'PipelineFor'] ]
+              InputArtifacts:
+                - Name: !Join [ "", ['src_', !Ref 'PipelineFor'] ]
+                - Name: TerraformPlan
+              OutputArtifacts:
+                - Name: TerraformOutput
+              RunOrder: 3
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [codepipeline, sql, !Ref 'Project',!Ref 'EnvType']]
+        - Key: Project
+          Value: !Ref Project
+        - Key: EnvType
+          Value: !Ref EnvType
+        - Key: PipelineFor
+          Value: !Ref PipelineFor
+  
+  CloudWatchLogGroupPlan:
+    Type: "AWS::Logs::LogGroup"
+    DependsOn: CodeBuildTerraformPlan
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Join ["/", ['/aws', codebuild, !Join [ "-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,plan]]]]
+      RetentionInDays: '365'
+
+  CloudWatchLogGroupApply:
+    Type: "AWS::Logs::LogGroup"
+    DependsOn: CodeBuildTerraformApply
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Join ["/", ['/aws', codebuild, !Join [ "-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,apply]]]]
+      RetentionInDays: '365'
+
+###########
+# Outputs #
+###########
+Outputs:
+#Codepipeline
+  TerraformPipelineVersion:
+    Description: Terraform Apply CodePipeline Version
+    Value: !GetAtt TerraformPipeline.Version
+    Export:
+      Name: !Sub ${AWS::StackName}-TerraformPipelineVersion

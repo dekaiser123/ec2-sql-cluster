@@ -1,0 +1,14 @@
+---
+- include_tasks: 00-CopyScripts.yaml
+- include_tasks: 01-prepare-instance.yaml
+- include_tasks: 02-Sqlag-Win-Firewall.yaml
+- include_tasks: 10-Sql-install.yaml
+- include_tasks: 11-Sqlag.yaml
+  when:
+    - (cluWitness | lower ) != "standalone"
+    - (HOST_COUNT | int) > 1
+#- include_tasks: 04-dsc-sql-install.yaml
+#- import_tasks: 03-dsc-sqlag.yml
+#- import_tasks: 04-dsc-sql_testdb.yml
+#- import_tasks: ../../sql_single/tasks/03-sqlmaint-scripts-copy.yml
+#- import_tasks: 05-dsc-createfile.yml

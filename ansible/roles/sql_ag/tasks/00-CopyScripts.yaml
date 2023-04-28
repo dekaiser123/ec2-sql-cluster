@@ -1,0 +1,18 @@
+---
+- name: check the directory if already exist
+  win_stat:
+    path: C:\SQL\ansible
+  register: FolderCheck
+
+- name: Copy folder contents recursively
+  win_copy:
+    src: sql_ag
+    dest: C:\SQL\ansible
+  become: yes
+  become_user: Administrator
+  # ignore_errors: yes
+  register: CopyAnsibleScript
+  when: FolderCheck.stat.exists
+
+- debug:
+    var: CopyAnsibleScript.changed

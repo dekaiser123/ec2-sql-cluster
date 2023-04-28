@@ -1,0 +1,9 @@
+---
+
+- name: SQL Server Configuration
+  #serial: 1
+  hosts: SQL_SVRNODE
+  gather_facts: no
+  any_errors_fatal: True
+  roles:
+     - sql_ag

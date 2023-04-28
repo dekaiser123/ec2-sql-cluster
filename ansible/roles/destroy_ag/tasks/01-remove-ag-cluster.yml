@@ -1,0 +1,26 @@
+---
+- name: check remove-ag-cluster.ps1 exist
+  win_stat:
+    path: C:\SQL\ansible\destroy_ag\remove-ag-cluster.ps1
+  register: RemoveAgCluster
+
+- name: Check if instance is on domain.
+  ansible.windows.win_command: powershell.exe -
+  args:
+    stdin: Test-ComputerSecureChannel -Verbose
+  register: domain_join_test_result
+  # ignore_errors: yes
+
+- name: Run remove-ag-cluster.ps1
+  win_command: powershell.exe -ExecutionPolicy ByPass -File C:\SQL\ansible\destroy_ag\remove-ag-cluster.ps1
+  when: "'True' in domain_join_test_result.stdout"
+  register: RemoveClusterWithAD
+  failed_when: RemoveClusterWithAD.rc != 0
+  vars:
+    ansible_become: yes
+    ansible_become_method: runas
+    ansible_become_user: "{{ ad_srv_user }}"
+    ansible_become_pass: "{{ ad_srv_pwd }}"
+    ansible_become_flags: logon_type=batch
+
+- debug: msg="{{ RemoveClusterWithAD }}"

@@ -1,0 +1,478 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This template creates pipeline to execute  ansible module for SQL.
+
+############
+# Mappings #
+############
+
+
+##############
+# Parameters #
+##############
+
+Parameters:
+  EnvType:
+    Description: "Platform that these resources are being created for."
+    Type: String
+    AllowedValues:
+      - dev
+      - uat
+      - prod
+      - test
+  Project:
+    Description: Project Application Name for which resources are created.
+    Type: String
+    AllowedPattern: ^[a-z]+(-[a-z]+)*$
+    ConstraintDescription: Malformed input-Parameter ProjectName must only contain lowercase letters and hyphens.
+
+  PipelineFor:
+    Description: Resource that will be created by the Pipeline
+    Type: String
+    Default: ansible
+
+  GitRepo:
+    Description: The repo name without the env prefix
+    Type: String
+    Default: ec2-sql-cluster
+
+  ArtifactBucket:
+    Type: String
+    Description: Aritfact bucket name for webhook/codebuild
+
+  AppBucket:
+    Type: String
+    Description: App bucket where runtime is stored
+
+  VPC:
+    Type: "AWS::EC2::VPC::Id"
+    Description: The vpc to launch the service
+
+  Subnets:
+    Description: Select primary and secondary subnets
+    Type: List<AWS::EC2::Subnet::Id>
+
+  SecurityGroups:
+    Description: Select Stackset and ansible SGs
+    Type: List<AWS::EC2::SecurityGroup::Id>
+
+  S3AppBucketSync:
+    Description: 1 = true, 0 = false
+    Type: Number
+    MaxValue: 1
+    MinValue: 0
+    Default: 0
+
+  AnsiblePlaybook:
+    Description: Select Ansible Playbook
+    Type: String
+    AllowedValues:
+      - newbuild
+      - rebuild
+      - destroy
+      - patch
+
+#############
+# Metadata #
+#############
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment-Specific Configuration"
+        Parameters:
+          - EnvType
+      - Label:
+          default: "Project Name"
+        Parameters:
+          - Project
+          - PipelineFor
+      - Label:
+          default: "Input variable values from another stack/bootstrap"
+        Parameters:
+          - ApprovalNotificationTopicARN
+          - ArtifactBucket
+          - AppBucket
+          - GitRepo
+      - Label:
+          default: "Ansible Control"
+        Parameters:
+          - VPC
+          - Subnets
+          - SecurityGroups
+          - S3AppBucketSync
+          - AnsiblePlaybook
+    ParameterLabels:
+      Account:
+        default: "Which SMC platform this pipeline are created ??"
+#############
+# Conditions #
+#############
+Conditions:
+  CreateProdResources: !Equals [ !Ref EnvType, "prod" ]
+  SetS3AppBucketSync: !Equals [!Ref S3AppBucketSync, 1]
+#############
+# Resources #
+#############
+Resources:
+#CodeBuild IAM Role --full admin access
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: '/'
+      # ManagedPolicyArns:
+      #   - 'arn:aws:iam::aws:policy/AdministratorAccess'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+                - codepipeline.amazonaws.com
+      RoleName: !Join ["-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,config,role]]
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,config,role]]
+        - Key: Project
+          Value: !Ref Project
+        - Key: EnvType
+          Value: !Ref EnvType
+        - Key: PipelineFor
+          Value: !Ref PipelineFor
+  CodeBuildPolicy:
+    Type: "AWS::IAM::Policy"
+    DependsOn: CodeBuildServiceRole
+    Properties:
+      PolicyName: !Join ["-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,config,policy]]
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: IamAccess
+            Effect: Allow
+            Action:
+              - codebuild:*
+              - ec2:*
+              - iam:*
+              - logs:*
+              - secretsmanager:*
+              - kms:*
+              - sns:*
+              - s3:*
+              - codepipeline:*
+              - codestar-notifications:*
+              - events:*
+              - lambda:*
+            Resource: "*"
+          - Sid: S3Access
+            Effect: Allow
+            Action:
+              - s3:*
+            Resource:
+              - !Sub
+                    - 'arn:aws:s3:::${ArtifactBucket}'
+                    - ArtifactBucket: !Ref ArtifactBucket
+              - !Sub
+                    - 'arn:aws:s3:::${ArtifactBucket}/*'
+                    - ArtifactBucket: !Ref ArtifactBucket
+              # - !Sub
+              #       - 'arn:aws:s3:::${ArtifactBucket}'
+              #       - ArtifactBucket: { Fn::ImportValue: !Join [ "-", [ !Ref EnvType, !Ref InfraCommonStack, ArtifactBucketName ] ] }
+              # - !Sub
+              #       - 'arn:aws:s3:::${ArtifactBucket}/*'
+              #       - ArtifactBucket: { Fn::ImportValue: !Join [ "-", [ !Ref EnvType, !Ref InfraCommonStack, ArtifactBucketName ] ] }
+          - Sid: SsmParameterAccess
+            Effect: Allow
+            Action:
+              - ssm:*
+            Resource:
+              - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:*
+      Roles:
+        - !Ref CodeBuildServiceRole  
+
+#CodeBuild Project buildspec definition
+  CodeBuildTerraformOutput:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CodeBuildPolicy #need to ensure policy is created and attached to iam before codebuild
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec/TerraformOutput.yaml
+      Environment:
+        ComputeType: 'BUILD_GENERAL1_SMALL'
+        Image: 'aws/codebuild/standard:5.0'
+        Type: 'LINUX_CONTAINER'
+        EnvironmentVariables:
+          - Name: Project
+            Value: !Ref Project
+          - Name: EnvType
+            Value: !Ref EnvType
+          - Name: PipelineFor
+            Value: !Ref PipelineFor
+          - Name: S3AppBucketSync
+            Value: !If [SetS3AppBucketSync, true, false]
+          - Name: S3AppBucket
+            Value: !Ref AppBucket
+      Name: !Join ["-", [codepipeline, sql, !Ref 'Project',!Ref 'EnvType',codebuild,output]]
+      LogsConfig:
+        CloudWatchLogs:
+          Status: 'ENABLED'
+          GroupName: !Join ["/", ['/aws', codebuild, !Join [ "-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,output]]]]
+      Description: Terraform output
+      ServiceRole: !Ref CodeBuildServiceRole
+      TimeoutInMinutes: 360
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [codepipeline, sql, !Ref 'Project',!Ref 'EnvType',codebuild,output]]
+        - Key: Project
+          Value: !Ref Project
+        - Key: EnvType
+          Value: !Ref EnvType
+        - Key: PipelineFor
+          Value: !Ref PipelineFor
+  CodeBuildAnsibleInventory:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CodeBuildPolicy
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec/AnsibleInventory.yaml
+      VpcConfig:
+        VpcId: !Ref VPC
+        Subnets: !Ref Subnets
+        SecurityGroupIds: !Ref SecurityGroups
+      Environment:
+        ComputeType: 'BUILD_GENERAL1_MEDIUM'
+        Image: 'aws/codebuild/standard:5.0'
+        Type: 'LINUX_CONTAINER'
+        EnvironmentVariables:
+          - Name: Project
+            Value: !Ref Project
+          - Name: EnvType
+            Value: !Ref EnvType
+          - Name: PipelineFor
+            Value: !Ref PipelineFor
+          - Name: S3AppBucket
+            Value: !Ref AppBucket
+          - Name: AnsiblePlaybook
+            Value: !Ref AnsiblePlaybook
+      Name: !Join ["-", [codepipeline, sql, !Ref 'Project',!Ref 'EnvType',codebuild,config]]
+      LogsConfig:
+        CloudWatchLogs:
+          Status: 'ENABLED'
+          GroupName: !Join ["/", ['/aws', codebuild, !Join [ "-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,config]]]]
+      Description: Ansible Configure
+      ServiceRole: !Ref CodeBuildServiceRole
+      TimeoutInMinutes: 360
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [codepipeline, sql, !Ref 'Project',!Ref 'EnvType',codebuild,config]]
+        - Key: Project
+          Value: !Ref Project
+        - Key: EnvType
+          Value: !Ref EnvType
+        - Key: PipelineFor
+          Value: !Ref PipelineFor
+
+#CodePipeline Role and Attach policy --
+  # CodePipelineExecutionRole:
+  #   Type: 'AWS::IAM::Role'
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Version: '2012-10-17'
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal:
+  #             Service:
+  #               - codepipeline.amazonaws.com
+  #           Action:
+  #             - 'sts:AssumeRole'
+  #     Path: /
+  #     Policies:
+  #        -
+  #         PolicyName: PassRoleToCodeBuild-InlinePolicy
+  #         PolicyDocument:
+  #           Version: '2012-10-17'
+  #           Statement:
+  #             - Action: 'iam:PassRole'
+  #               Effect: Allow
+  #               Resource:
+  #                 - !GetAtt CodeBuildServiceRole.Arn
+  #     RoleName: !Join ["-", [!Ref 'Project',!Ref 'EnvType',!Ref 'PipelineFor',codepipeline,role]]
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Join ["-", [!Ref 'Project',!Ref 'EnvType',!Ref 'PipelineFor',codepipeline,role]]
+  #       - Key: Project
+  #         Value: !Ref Project
+  #       - Key: EnvType
+  #         Value: !Ref EnvType
+  #       - Key: PipelineFor
+  #         Value: !Ref PipelineFor
+  # CodePipelineManagedPolicy:
+  #   Type: AWS::IAM::ManagedPolicy
+  #   Properties:
+  #     PolicyDocument:
+  #       Version: '2012-10-17'
+  #       Statement:
+  #         - Sid: CodePipelineSNSAccess
+  #           Effect: Allow
+  #           Action:
+  #             - sns:Publish
+  #           Resource: '*'
+  #         - Sid: CodePipelineCodeBuildAccess
+  #           Effect: Allow
+  #           Action:
+  #             - codebuild:StartBuild
+  #             - codebuild:StopBuild
+  #             - codebuild:BatchGetBuilds
+  #           Resource:
+  #             - !GetAtt CodeBuildTerraformOutput.Arn
+  #             - !GetAtt CodeBuildAnsibleInventory.Arn
+  #         - Sid: AllowAllUsersToListAccounts
+  #           Effect: Allow
+  #           Action:
+  #             - iam:ListAccountAliases
+  #             - iam:ListUsers
+  #             - iam:GetAccountSummary
+  #           Resource: "*"
+  #         - Sid: CodePipelineCodeCommitAccess
+  #           Effect: Allow
+  #           Action:
+  #             - codecommit:GetBranch
+  #             - codecommit:GetCommit
+  #             - codecommit:UploadArchive
+  #             - codecommit:GetUploadArchiveStatus
+  #             - codecommit:CancelUploadArchive
+  #           Resource: "*"
+  #         - Sid: CodePipelineS3ArtifactAccess
+  #           Effect: Allow
+  #           Action:
+  #             - s3:*
+  #           Resource:
+  #             - !Sub
+  #                   - 'arn:aws:s3:::${TerraformState}/*'
+  #                   - TerraformState: { Fn::ImportValue: !Join [ "-", [ !Ref EnvType, !Ref TFStateStack, BucketName ] ] }
+  #             - !Sub
+  #                   - 'arn:aws:s3:::${TerraformState}'
+  #                   - TerraformState: { Fn::ImportValue: !Join [ "-", [ !Ref EnvType, !Ref TFStateStack, BucketName ] ] }
+  #             - !Sub
+  #                   - 'arn:aws:s3:::${ArtifactBucket}/*'
+  #                   - ArtifactBucket: { Fn::ImportValue: !Join [ "-", [ !Ref EnvType, !Ref TFStateStack, ArtifactBucketName ] ] }
+  #             - !Sub
+  #                   - 'arn:aws:s3:::${ArtifactBucket}'
+  #                   - ArtifactBucket: { Fn::ImportValue: !Join [ "-", [ !Ref EnvType, !Ref TFStateStack, ArtifactBucketName ] ] }
+  #     ManagedPolicyName: !Join ["-", [!Ref 'Project',!Ref 'EnvType',!Ref 'PipelineFor',codepipeline,policy]]
+  #     Description: "CodePipeline Managed Policy"
+  #     Roles:
+  #       - !Ref CodePipelineExecutionRole
+
+#pipeline creation
+  AnsiblePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn: CodeBuildPolicy
+    Properties:
+      ArtifactStore:
+        Location: !Ref ArtifactBucket
+        Type: S3
+        #EncryptionKey: !Ref "AWS::NoValue"
+      Name: !Join ["-", [codepipeline, sql, !Ref 'Project',!Ref 'EnvType',config]]
+      RoleArn: !GetAtt CodeBuildServiceRole.Arn
+      Stages:
+        - Name: GetSourceCode
+          Actions:
+            - Name: CodeRepoFromGitHealth
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                S3Bucket: !Ref ArtifactBucket
+                S3ObjectKey: !Join [ "", [!Ref 'EnvType','-',!Ref GitRepo,'.zip'] ]
+                PollForSourceChanges: False
+              OutputArtifacts:
+                - Name: !Join [ "", ['src_', !Ref 'PipelineFor'] ]
+              RunOrder: '1'
+        - Name: InfrastructureOutput
+          Actions:
+            - Name: TerraformOutput
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildTerraformOutput
+                PrimarySource: !Join [ "", ['src_', !Ref 'PipelineFor'] ]
+              Namespace: OutputValidation
+              InputArtifacts:
+                - Name: !Join [ "", ['src_', !Ref 'PipelineFor'] ]
+              OutputArtifacts:
+                - Name: TerraformOutput
+              RunOrder: 1
+#            - Name: ReviewApproval
+#              ActionTypeId:
+#                Category: Approval
+#                Owner: AWS
+#                Version: '1'
+#                Provider: Manual
+#              Configuration:
+#                NotificationArn:
+#                  'Fn::ImportValue':
+#                    !Ref 'ApprovalNotificationTopicArn'
+#              RunOrder: 2
+            - Name: SQLAnsibleInventory
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildAnsibleInventory
+                PrimarySource: !Join [ "", ['src_', !Ref 'PipelineFor'] ]
+              InputArtifacts:
+                - Name: !Join [ "", ['src_', !Ref 'PipelineFor'] ]
+                - Name: TerraformOutput
+              OutputArtifacts:
+                - Name: AnsibleSqlInventory
+              RunOrder: 3
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [codepipeline, sql, !Ref 'Project',!Ref 'EnvType',config]]
+        - Key: Project
+          Value: !Ref Project
+        - Key: EnvType
+          Value: !Ref EnvType
+        - Key: PipelineFor
+          Value: !Ref PipelineFor
+  
+  CloudWatchLogGroupOutput:
+    Type: "AWS::Logs::LogGroup"
+    DependsOn: CodeBuildTerraformOutput
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Join ["/", ['/aws', codebuild, !Join [ "-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,output]]]]
+      RetentionInDays: '365'
+
+  CloudWatchLogGroupConfig:
+    Type: "AWS::Logs::LogGroup"
+    DependsOn: CodeBuildAnsibleInventory
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Join ["/", ['/aws', codebuild, !Join [ "-", [codepipeline,sql,!Ref 'Project',!Ref 'EnvType',codebuild,config]]]]
+      RetentionInDays: '365'
+
+###########
+# Outputs #
+###########
+Outputs:
+#Codepipeline
+  AnsiblePipelineVersion:
+    Description: Ansible Configure CodePipeline Version
+    Value: !GetAtt AnsiblePipeline.Version
+    Export:
+      Name: !Sub ${AWS::StackName}-AnsiblePipelineVersion

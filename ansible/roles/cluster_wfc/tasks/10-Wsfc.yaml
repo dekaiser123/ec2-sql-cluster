@@ -1,0 +1,51 @@
+---
+- name: Install Windows cluster, sub features and management tools
+  win_feature:
+    name:
+    - Failover-Clustering
+    - RSAT-Clustering
+    - RSAT-AD-PowerShell
+    - RSAT-ADLDS
+    state: present
+    include_sub_features: yes
+    include_management_tools: yes
+  register: win_feature
+  retries: 3
+  delay: 15
+  until: win_feature is not failed
+
+- name: Reboot if installing Failover-Clustering feature requires it
+  win_reboot:
+  when: win_feature.reboot_required
+
+## Wsfc script
+- name: check CreateFailoverClusterWithXNodesConfig.ps1 exist
+  win_stat:
+    path: C:\SQL\ansible\cluster_wfc\CreateFailoverClusterWithXNodesConfig.ps1
+  register: CreateFailoverClusterWithXNodesConfig
+
+- name: Run CreateFailoverClusterWithXNodesConfig.ps1
+  # run_once: true
+  win_command: powershell.exe -ExecutionPolicy ByPass -File C:\SQL\ansible\cluster_wfc\CreateFailoverClusterWithXNodesConfig.ps1
+  # ignore_errors: yes
+  # ignore_unreachable: yes
+  # become: yes
+  # become_user: Administrator
+  vars:
+    ansible_become: yes
+    ansible_become_method: runas
+    ansible_become_user: "{{ ad_srv_user }}" #need to log in as srv to create the file witness folder
+    ansible_become_pass: "{{ ad_srv_pwd }}"
+    ansible_become_flags: logon_type=batch
+  register: FailoverClusterWithXNodesConfig
+  when: CreateFailoverClusterWithXNodesConfig.stat.exists
+  run_once: true
+  delegate_to: "{{ play_hosts[0] }}"
+
+- debug: 
+    var: FailoverClusterWithXNodesConfig.stdout_lines
+  run_once: true
+
+- debug: 
+    var: FailoverClusterWithXNodesConfig.stderr_lines
+  run_once: true
