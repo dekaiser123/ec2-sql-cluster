@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: This template creates webhook for Githealth -- requires additional manual config
+Description: This template creates webhook for GitHub -- requires additional manual config
 ## Mappings ##
 Mappings:
   GitHub:
@@ -195,7 +195,7 @@ Resources:
         Auth: #May need to comment out this section when PAT already in use
           Resource: !If [EmptyCodeBuildGitCredentialARN, !Ref CodeBuildGitCredential, !Ref CodeBuildGitCredentialARN]
           Type: OAUTH
-        BuildSpec: buildspec/GitHealthSource.yaml
+        BuildSpec: buildspec/GitHubSource.yaml
       Environment:
         ComputeType: 'BUILD_GENERAL1_SMALL'
         Image: 'aws/codebuild/standard:5.0'
@@ -206,7 +206,7 @@ Resources:
           - Name: EnvType
             Value: !Ref EnvType
       Name: !Join ["-", [!Ref EnvType,!FindInMap [ !Ref GitRepository,details,Repo ]]]
-      Description: Webhook for GitHealth
+      Description: Webhook for GitHub
       ServiceRole: !Ref CodeBuildServiceRole
       TimeoutInMinutes: 15
       Cache:

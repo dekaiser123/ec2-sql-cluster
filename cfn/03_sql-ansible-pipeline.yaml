@@ -384,7 +384,7 @@ Resources:
       Stages:
         - Name: GetSourceCode
           Actions:
-            - Name: CodeRepoFromGitHealth
+            - Name: CodeRepoFromGitHub
               ActionTypeId:
                 Category: Source
                 Owner: AWS
