@@ -38,6 +38,7 @@ The pipelines performs terraform and ansible. There is approval gate-keeper to p
 - AWS Managed MS Active Directory for FSx (service demonstrator)
 - AD Domain Join account username, password and OU
 - AD SQL service account username and password
+- AD SQL/Server Admin group
 
 ## Deploying the environment
 
