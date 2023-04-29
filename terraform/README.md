@@ -203,4 +203,4 @@ sql_nodes = {
 - Match the number of initial order of nodes to how many AZs is available in your region with the appropiate `Role` tag. Example if your region only has 3 AZs, then the first three nodes in the `sql_nodes` map object needs to have a `Role` tag other than `spare`.
 - For SQL 2016-2019 Enterprise maximum supported nodes is 9 for AlwaysOn AG. Limits apply to number of synchronous secondary replicas.
 - This can be used to provision a single node SQL server, but `output_sql_fsx_details = "standalone"`
-- Replace any fields `< value >` with its correspondent
+- Replace any fields `<value>` with its correspondent

@@ -32,7 +32,7 @@ $entries | foreach {[IO.Compression.ZipFileExtensions]::ExtractToFile($_, ("C:\S
 $zip.Dispose()
 $global:instanceId = Get-EC2InstanceMetadata -Category InstanceId
 if ($Error) {
-    ErrorLog($_)
+    New-Item $TaskLogPath\"fatal_no_scripts.log" -ItemType file
     throw("Could not extract scripts from repo")
     exit 1
 }
