@@ -1,6 +1,6 @@
 # Ansible
 
-This ansible code is to orchestra the configration of MS SQL AG cluster.
+This ansible code is to orchestrate the configration of MS SQL AG cluster.
 
 ## Requirements
 
